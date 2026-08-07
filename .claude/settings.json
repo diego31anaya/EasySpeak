@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xcrun devicectl *)",
+      "Bash(command -v ideviceinfo)",
+      "Bash(ideviceinfo -k ProductType)",
+      "Bash(node -e \"try{const d=require\\('/tmp/devs.json'\\);\\(d.result?.devices||[]\\).forEach\\(x=>console.log\\(x.deviceProperties?.name,'|',x.hardwareProperties?.productType,'|',x.hardwareProperties?.marketingName,'|', x.deviceProperties?.osVersionNumber\\)\\)}catch\\(e\\){console.log\\('parse fail',e.message\\)}\")",
+      "Bash(grep -r \"FPS\\\\|dropped\\\\|frame\\\\|perf\\\\|requestIdleCallback\\\\|InteractionManager\" /Users/diegoanaya/Desktop/EasySpeak/EasySpeak --include=\"*.tsx\" --include=\"*.ts\" ! -path \"*/node_modules/*\")",
+      "Bash(node -e \"const s=require\\('./package.json'\\).scripts||{};console.log\\(Object.keys\\(s\\).join\\(', '\\)||'\\(no scripts\\)'\\)\")",
+      "Bash(npx eslint *)",
+      "Bash(grep -n \"in an \\\\*\\\\*animated slot\\\\*\\\\* that widens\\\\|a transform-only rewrite \\(translateX + a \\\\`slotOpen\\\\` layout toggle\\) was tried and reverted\" CLAUDE.md)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m ' *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.swmansion.com)",
+      "WebFetch(domain:www.reactnative.university)",
+      "Bash(git restore *)"
+    ]
+  }
+}

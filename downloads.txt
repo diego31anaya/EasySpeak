@@ -1,0 +1,18 @@
+npx expo install @supabase/supabase-js @react-native-async-storage/async-storage react-native-url-polyfill
+npx expo install expo-audio
+npx expo install expo-speech
+npx expo install react-native-safe-area-context
+npx expo install expo-file-system
+npx expo install expo-linear-gradient
+npx expo install @expo-google-fonts/inter @expo-google-fonts/space-grotesk @expo-google-fonts/plus-jakarta-sans @expo-google-fonts/outfit @expo-google-fonts/satoshi @expo-google-fonts/manrope @expo-google-fonts/general-sans
+npx expo install expo-font @expo-google-fonts/inter @expo-google-fonts/space-grotesk @expo-google-fonts/plus-jakarta-sans @expo-google-fonts/outfit @expo-google-fonts/manrope @expo-google-fonts/sora
+npx expo install react-native-svg
+
+npx expo run:ios --device
+npx expo start --dev-client
+
+npx expo run:ios --configuration Release --device
+
+npx pod-install
+
+rm -rf ios/Pods ios/build ios/Podfile.lock && npx pod-install && npx expo run:ios --device
