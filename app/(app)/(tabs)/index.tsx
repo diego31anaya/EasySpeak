@@ -3,17 +3,15 @@
 // Sections, top to bottom:
 //   1. Masthead   — streak badge (top-left) + a centered "Home" title.
 //   2. Greeting   — a time-of-day line (Good morning / afternoon / evening), no name.
-//   3. Week strip — the current local week as 7 dots; a connector between two days is
-//                   blue only when BOTH have a session (a run reads as one blue line).
+//   3. Week strip — a rolling 5-day view of practice activity.
 //   4. Featured   — one tall card = today's featured practice mode (rotates daily).
 //   5. Or try     — the next mode in the rotation, as a compact row.
 //   6. Recent     — a feed of the most recent sessions, each with a ScoreRing.
 //
-// Data: one listSessions window + the streak, fetched on focus and SEEDED from the
-// launch prefetch (lib/launch) so a cold start paints real data with no skeleton/grey
-// flash. Taglines / the "FEATURED" kicker / greeting are PLACEHOLDER copy.
+// Data: separate TanStack Query reads power the week strip and Recent feed.
+// Taglines / the "FEATURED" kicker / greeting are PLACEHOLDER copy.
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, type Href } from 'expo-router';
@@ -31,17 +29,17 @@ import {
   BOX_SHADOW_ELEVATED,
 } from '../../../lib/theme';
 import { enterFlow } from '../../../lib/navigation';
-import { listSessions, type SessionListItem, type SessionMode } from '../../../lib/sessions';
-import { consumeLaunchSessions } from '../../../lib/launch';
+import { fetchWeekStrip, listSessions, type SessionListItem, type SessionMode } from '../../../lib/sessions';
 import { deviceLocalDate } from '../../../lib/streak';
 import { sessionTitle, formatWhen, FavoriteStar } from '../../../components/SessionCard';
-import { ScoreRing, SCORE_RING_SIZE } from '../../../components/ScoreRing';
+import { ScoreRing, ScoreRingError, SCORE_RING_SIZE } from '../../../components/ScoreRing';
 import { Skeleton } from '../../../components/Skeleton';
-import { useDelayedFlag } from '../../../hooks/use-delayed-flag';
 import { formatTimestamp } from '../../../lib/metrics';
+import { useAuth } from '@/lib/auth';
+import { useQuery } from '@tanstack/react-query';
+import { useLocalDay } from '../../../hooks/use-local-day';
 
 const RECENT_LIMIT = 4; // feed rows shown on Home; full list lives at /history
-const FETCH_LIMIT = 20; // one window: powers the week strip + the feed
 
 // ============================================================
 // Practice modes shown on Home, in daily-rotation order. Each LOCAL day one mode is
@@ -129,50 +127,30 @@ function greetingFor(date: Date): string {
 // ============================================================
 
 export default function Home() {
-  // One date for the whole render so the greeting, week strip, and daily mode rotation
-  // agree even across a midnight tick mid-session.
+  const { session } = useAuth();
+  const userId = session?.user.id ?? '';
+
+  const localDay = useLocalDay();
+  const todayDate = dateFromLocalDay(localDay);
+  // The greeting depends on the current hour, while the shared local day keeps all
+  // calendar-day features synchronized across midnight and foreground resumes.
   const now = new Date();
 
   // Daily-rotating practice picks: `featured` = today's mode (the tall card), `secondary`
   // = the next mode in the rotation (the "Or try" row). Both advance one step each local
   // day (see featuredIndexForDate) and are always distinct (rotation length > 1).
-  const featuredIdx = featuredIndexForDate(now);
+  const featuredIdx = featuredIndexForDate(todayDate);
   const featured = ROTATION[featuredIdx];
   const secondary = ROTATION[(featuredIdx + 1) % ROTATION.length];
 
-  // Seed from the launch prefetch (consume-once) so a cold start paints the streak,
-  // greeting, featured card, and the first sessions instantly — no skeleton/grey
-  // flash. null ⇒ first fetch still in flight. The focus-fetch below upgrades sessions
-  // to the full FETCH_LIMIT window (the prefetch only holds a few rows).
-  const [sessions, setSessions] = useState<SessionListItem[] | null>(() => consumeLaunchSessions());
-  // Surfaced only when there's no data to show (sessions === null); a refetch failure
-  // over already-loaded rows stays silent and keeps the stale rows.
-  const [error, setError] = useState<string | null>(null);
-  // Live streak count shared by every tab through the tabs-scoped provider.
   // Synchronous double-tap guard so a fast double tap can't push two reviews.
   const openingRef = useRef(false);
-
-  const loadSessions = useCallback(async () => {
-    try {
-      setError(null);
-      setSessions(await listSessions({ limit: FETCH_LIMIT }));
-    } catch (e: any) {
-      console.warn('[home] sessions load failed:', e);
-      setError(e?.message ?? 'Could not load your sessions.');
-    }
-  }, []);
 
   useFocusEffect(
     useCallback(() => {
       openingRef.current = false;
-      loadSessions();
-    }, [loadSessions]),
+    }, []),
   );
-
-  const recent = (sessions ?? []).slice(0, RECENT_LIMIT);
-  // Skeleton in the Recent feed only while the first fetch is genuinely in flight
-  // (no data yet, no error) and slow enough to perceive.
-  const showSkeleton = useDelayedFlag(sessions === null && !error, 150);
 
   const openSession = useCallback((item: SessionListItem) => {
     if (openingRef.current) return;
@@ -199,9 +177,8 @@ export default function Home() {
 
           {/* 3 — Week strip */}
           <WeekStrip
-            sessions={sessions}
-            now={now}
-            loading={sessions === null}
+            userId={userId}
+            localDay={localDay}
             onPress={() => go('/streaks', Haptics.ImpactFeedbackStyle.Light)}
           />
 
@@ -226,124 +203,147 @@ export default function Home() {
           </View>
 
           {/* 6 — Recent activity */}
-          <View style={styles.recent}>
-            <View style={styles.recentHeader}>
-              <Text style={styles.sectionLabel}>RECENT</Text>
-              {recent.length > 0 && (
-                <Pressable
-                  onPress={() => go('/history', Haptics.ImpactFeedbackStyle.Light)}
-                  hitSlop={8}
-                  accessibilityRole="button"
-                  accessibilityLabel="See all sessions"
-                  style={({ pressed }) => pressed && styles.pressedDim}
-                >
-                  <Text style={styles.seeAll}>See all</Text>
-                </Pressable>
-              )}
-            </View>
-
-            {sessions === null ? (
-              error ? (
-                // Fetch failed with nothing to show — tappable retry (stale rows, if
-                // any, would have kept `sessions` non-null and never reach here).
-                <Pressable
-                  onPress={loadSessions}
-                  accessibilityRole="button"
-                  accessibilityLabel="Couldn't load sessions. Tap to retry."
-                  style={({ pressed }) => [styles.retryBlock, pressed && styles.pressedDim]}
-                >
-                  <Text style={styles.retryTitle}>Couldn&apos;t load sessions</Text>
-                  <Text style={styles.retryHint}>Tap to retry</Text>
-                </Pressable>
-              ) : showSkeleton ? (
-                <View>
-                  {[0, 1, 2].map((i) => (
-                    <FeedRowSkeleton key={i} showDivider={i > 0} />
-                  ))}
-                </View>
-              ) : null
-            ) : recent.length === 0 ? (
-              <Text style={styles.emptyLine}>Finish a practice and it&apos;ll show up here.</Text>
-            ) : (
-              <View>
-                {recent.map((item, i) => (
-                  <FeedRow
-                    key={item.id}
-                    item={item}
-                    showDivider={i > 0}
-                    onPress={() => openSession(item)}
-                  />
-                ))}
-              </View>
-            )}
-          </View>
+          <RecentHistory
+            userId={userId}
+            go={go}
+            openSession={openSession}
+          />
         </ScrollView>
     </View>
   );
 }
 
 // ============================================================
-// Week strip — the current local week as 7 dots; today gets an accent ring; a
-// connector between two days is blue only when both have a session.
+// Week strip — a rolling 5-day view; today gets an accent ring.
 // ============================================================
 
-const WEEK_INITIALS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+const DAY_INITIALS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
 
-type WeekDay = { initial: string; practiced: boolean; isToday: boolean; isFuture: boolean };
+type WeekDay = {
+  date: string;
+  initial: string;
+  practiced: boolean;
+  isToday: boolean;
+  isFuture: boolean;
+};
 
 function buildWeek(
-  sessions: SessionListItem[] | null,
+  practicedDates: string[],
   now: Date,
 ): { days: WeekDay[] } {
-  // Gets all of the dates of the sessions array and puts them in a set
-  const practiced = new Set((sessions ?? []).map((s) => deviceLocalDate(new Date(s.createdAt))));
-  const todayStr = deviceLocalDate(now);
+  const practiced = new Set(practicedDates);
+  const today = deviceLocalDate(now);
 
-  const mondayOffset = (now.getDay() + 6) % 7; // days since Monday (Mon-start week)
-  const monday = new Date(now);
-  monday.setDate(now.getDate() - mondayOffset);
+  // Creates an array with all of the recent dates
+  const recentDates = Array.from({ length: 5 }, (_, index) => {
+    const date = new Date(now);
+    date.setDate(now.getDate() - 4 + index);
 
-  const days: WeekDay[] = [];
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(monday);
-    d.setDate(monday.getDate() + i);
-    const ds = deviceLocalDate(d); // ISO YYYY-MM-DD → lexicographic = chronological
-    days.push({
-      initial: WEEK_INITIALS[i],
-      practiced: practiced.has(ds),
-      isToday: ds === todayStr,
-      isFuture: ds > todayStr,
-    });
-  }
-  // brings back an array, one index represents each day respectively with its inital,
-  // if the day was practiced on, if its today, or if its in the future
-  return { days };
+    return {
+      date,
+      dateString: deviceLocalDate(date)
+    }
+  })
+
+  // Finds the first date that has a practiced session
+  const firstPracticedDate = recentDates.find(({ dateString }) => practiced.has(dateString))
+
+  const stripStart = firstPracticedDate ? firstPracticedDate.date : now
+
+  const days = Array.from({ length: 5 }, (_, index) => {
+    const date = new Date(stripStart)
+    date.setDate(stripStart.getDate() + index);
+
+    const dateString = deviceLocalDate(date)
+
+    return {
+      date: dateString,
+      initial: DAY_INITIALS[date.getDay()],
+      practiced: practiced.has(dateString),
+      isToday: dateString === today,
+      isFuture: dateString > today,
+    }
+  })
+
+  return { days }
 }
 
 // Dot fill, ordered by salience so a missed past day reads stronger than a future
-// one: practiced (accent) > missed (visible grey) > today-not-yet (hollow, the ring
-// carries it) > future (faint). While `loading` (no data yet) every dot is faint so
-// the strip never paints a confident "you missed this week" before data lands.
-function dotVariant(d: WeekDay, loading: boolean) {
-  if (loading) return styles.dotFuture;
+// one: practiced (accent) > missed (danger) > today-not-yet (hollow, the ring
+// carries it) > future (grey).
+function dotVariant(d: WeekDay) {
   if (d.practiced) return styles.dotFilled;
   if (d.isToday) return styles.dotTodayOpen;
   if (d.isFuture) return styles.dotFuture;
   return styles.dotMissed;
 }
 
+function dateFromLocalDay(localDay: string): Date {
+  const [year, month, day] = localDay
+    .split('-')
+    .map(Number);
+
+  // Local noon avoids UTC parsing and DST boundary ambiguity.
+  return new Date(year, month - 1, day, 12);
+}
+
 function WeekStrip({
-  sessions,
-  now,
-  loading,
+  userId,
+  localDay,
   onPress,
 }: {
-  sessions: SessionListItem[] | null;
-  now: Date;
-  loading: boolean;
+  userId: string;
+  localDay: string;
   onPress: () => void;
 }) {
-  const { days } = buildWeek(sessions, now);
+  const todayDate = dateFromLocalDay(localDay);
+
+
+  const throughDate = localDay;
+  const fourDaysAgo = new Date(todayDate);
+  fourDaysAgo.setDate(fourDaysAgo.getDate() - 4);
+
+  const fromDate = deviceLocalDate(fourDaysAgo);
+
+  const weekStripQueryKey = ['history', 'sessions', userId, 'week-strip', fromDate, throughDate,] as const;
+
+  const {
+    data: practicedDates,
+    isPending: isWeekStripPending,
+    isError: isWeekStripError,
+    refetch: refetchWeekStrip,
+  } = useQuery({
+    queryKey: weekStripQueryKey,
+    queryFn: () => fetchWeekStrip({fromDate, throughDate}),
+    enabled: Boolean(userId)
+  })
+
+  if (practicedDates === undefined && isWeekStripPending) {
+    return <Skeleton width="100%" height={WEEK_STRIP_HEIGHT} borderRadius={radius.lg} />;
+  }
+
+  if (practicedDates === undefined && isWeekStripError) {
+    return (
+      <Pressable
+        onPress={() => void refetchWeekStrip()}
+        accessibilityRole="button"
+        accessibilityLabel="Couldn't load activity. Tap to retry."
+        style={({ pressed }) => [
+          styles.weekCard,
+          styles.weekErrorCard,
+          pressed && styles.pressedCard,
+        ]}
+      >
+        <ScoreRingError />
+        <View style={styles.weekErrorText}>
+          <Text style={styles.weekErrorTitle}>Error while loading</Text>
+          <Text style={styles.weekErrorHint}>Tap to try again</Text>
+        </View>
+      </Pressable>
+    );
+  }
+
+  const { days } = buildWeek(practicedDates ?? [], todayDate);
 
   return (
     <Pressable
@@ -352,47 +352,24 @@ function WeekStrip({
       accessibilityLabel="View your streak"
       style={({ pressed }) => [styles.weekCard, pressed && styles.pressedCard]}
     >
-      <Text style={styles.sectionLabel}>THIS WEEK</Text>
-
-      <View style={styles.dotsArea}>
-        {/* Connector segments behind the dots: each spans one cell (dot-center to
-            dot-center) and is blue only when BOTH days it joins have a session, grey
-            otherwise — so a run of practiced days reads as one connected blue line. */}
-        {days.slice(0, 6).map((d, i) => (
-          <View
-            key={i}
-            style={[
-              styles.segment,
-              { left: `${((i + 0.5) / 7) * 100}%`, width: `${100 / 7}%` },
-              d.practiced && days[i + 1].practiced ? styles.segmentOn : styles.segmentOff,
-            ]}
-          />
-        ))}
-        <View style={styles.dotsRow}>
-          {days.map((d, i) => (
-            <View key={i} style={styles.dotCell}>
-              <View
-                style={[
-                  styles.dotRing,
-                  !loading && d.isToday && styles.dotRingToday,
-                  // Matte-fill the hollow today ring so the grey connector segment
-                  // doesn't run through its center (the line stops at the ring edge).
-                  // Skipped when today is practiced, so a blue segment still connects
-                  // to the blue dot.
-                  !loading && d.isToday && !d.practiced && styles.dotRingTodayFill,
-                ]}
-              >
-                <View style={[styles.dot, dotVariant(d, loading)]} />
+      <View style={styles.dotsRow}>
+        {days.map((day) => (
+          <View key={day.date} style={styles.dotCell}>
+            <View
+              style={[
+                styles.dotRing,
+                day.isToday && styles.dotRingToday,
+              ]}
+            >
+              <View style={[styles.dot, dotVariant(day)]}>
+                {day.practiced ? (
+                  <WeekCheckIcon />
+                ) : !day.isToday && !day.isFuture ? (
+                  <WeekMissedIcon />
+                ) : null}
               </View>
             </View>
-          ))}
-        </View>
-      </View>
-
-      <View style={styles.dotsRow}>
-        {days.map((d, i) => (
-          <View key={i} style={styles.dotCell}>
-            <Text style={[styles.dayInitial, d.isToday && styles.dayInitialToday]}>{d.initial}</Text>
+            <Text style={[styles.dayInitial, day.isToday && styles.dayInitialToday]}>{day.initial}</Text>
           </View>
         ))}
       </View>
@@ -533,6 +510,131 @@ function FeedRowSkeleton({ showDivider }: { showDivider: boolean }) {
 // Icons
 // ============================================================
 
+function RecentHistory({
+  userId,
+  go,
+  openSession,
+}: {
+  userId: string;
+  go: (href: Href, weight: Haptics.ImpactFeedbackStyle) => void;
+  openSession: (item: SessionListItem) => void;
+}) {
+  const recentQueryKey = ['history', 'sessions', userId, 'recent', RECENT_LIMIT] as const;
+  const { data: recentSessions, isPending, isError, refetch } = useQuery({
+    queryKey: recentQueryKey,
+    queryFn: () => listSessions({ limit: RECENT_LIMIT }),
+    enabled: Boolean(userId),
+  });
+
+  if (isPending && recentSessions === undefined) {
+    return (
+      <View style={styles.recent}>
+        <View style={styles.recentHeader}>
+          <Text style={styles.sectionLabel}>RECENT</Text>
+          <Text style={styles.seeAllMuted}>See all</Text>
+        </View>
+
+        <View>
+          {[0, 1, 2].map((i) => (
+            <FeedRowSkeleton key={i} showDivider={i > 0} />
+          ))}
+        </View>
+      </View>
+    );
+  }
+
+  if (isError && recentSessions === undefined) {
+    return (
+      <View style={styles.recent}>
+        <View style={styles.recentHeader}>
+          <Text style={styles.sectionLabel}>RECENT</Text>
+          <Text style={styles.seeAllMuted}>See all</Text>
+        </View>
+
+        <Pressable
+          onPress={() => void refetch()}
+          accessibilityRole="button"
+          accessibilityLabel="Couldn't load sessions. Tap to retry."
+          style={({ pressed }) => [styles.retryBlock, pressed && styles.pressedDim]}
+        >
+          <Text style={styles.retryTitle}>Couldn&apos;t load sessions</Text>
+          <Text style={styles.retryHint}>Tap to retry</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  if (recentSessions.length === 0) {
+    return (
+      <View style={styles.recent}>
+        <View style={styles.recentHeader}>
+          <Text style={styles.sectionLabel}>RECENT</Text>
+          <Text style={styles.seeAllMuted}>See all</Text>
+        </View>
+
+        <Text style={styles.emptyLine}>Finish a practice and it&apos;ll show up here.</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.recent}>
+      <View style={styles.recentHeader}>
+        <Text style={styles.sectionLabel}>RECENT</Text>
+        <Pressable
+          onPress={() => go('/history', Haptics.ImpactFeedbackStyle.Light)}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="See all sessions"
+          style={({ pressed }) => pressed && styles.pressedDim}
+        >
+          <Text style={styles.seeAll}>See all</Text>
+        </Pressable>
+      </View>
+
+      <View>
+        {recentSessions.map((item, i) => (
+          <FeedRow
+            key={item.id}
+            item={item}
+            showDivider={i > 0}
+            onPress={() => openSession(item)}
+          />
+        ))}
+      </View>
+    </View>
+  );
+}
+
+
+
+function WeekCheckIcon() {
+  return (
+    <Svg width={17} height={17} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M5 12.5l4.5 4.5L19 7.5"
+        stroke={colors.bg}
+        strokeWidth={2.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
+function WeekMissedIcon() {
+  return (
+    <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M7 7l10 10M17 7 7 17"
+        stroke={colors.bg}
+        strokeWidth={2.5}
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+}
+
 function ChevronRight({ size = 18, color }: { size?: number; color: string }) {
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
@@ -545,8 +647,9 @@ function ChevronRight({ size = 18, color }: { size?: number; color: string }) {
 // Styles
 // ============================================================
 
-const DOT = 9;
-const RING = 18;
+const DOT = 24;
+const RING = 34;
+const WEEK_STRIP_HEIGHT = 86;
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
@@ -610,23 +713,28 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     borderRadius: radius.lg,
     padding: spacing.lg,
-    gap: spacing.md,
     boxShadow: BOX_SHADOW_ELEVATED,
   },
-  dotsArea: {
-    // Explicit height = the dot row, so the absolutely-positioned connector
-    // segments (top: (RING-2)/2) stay anchored to a known box.
-    height: RING,
-    justifyContent: 'center',
+  weekErrorCard: {
+    minHeight: WEEK_STRIP_HEIGHT,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
   },
-  segment: {
-    position: 'absolute',
-    top: (RING - 2) / 2, // vertically centered on the dot row (height = RING)
-    height: 2,
-    borderRadius: 1,
+  weekErrorText: {
+    flex: 1,
+    gap: 2,
   },
-  segmentOn: { backgroundColor: colors.accent }, // both adjacent days practiced
-  segmentOff: { backgroundColor: colors.textSubtle }, // grey, same as a no-session dot
+  weekErrorTitle: {
+    fontSize: fontSize.md,
+    fontFamily: fonts.medium,
+    color: colors.text,
+  },
+  weekErrorHint: {
+    fontSize: fontSize.sm,
+    fontFamily: fonts.regular,
+    color: colors.textMuted,
+  },
   dotsRow: {
     flexDirection: 'row',
   },
@@ -634,6 +742,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    gap: spacing.xs,
   },
   dotRing: {
     width: RING,
@@ -647,34 +756,30 @@ const styles = StyleSheet.create({
   dotRingToday: {
     borderColor: colors.accent,
   },
-  // Card-colored fill so a connector segment behind the hollow today ring is masked
-  // (matches weekCard's surfaceElevated bg → invisible fill, just hides the line).
-  dotRingTodayFill: {
-    backgroundColor: colors.surfaceElevated,
-  },
   dot: {
     width: DOT,
     height: DOT,
     borderRadius: DOT / 2,
     backgroundColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   dotFilled: {
     backgroundColor: colors.accent, // practiced
   },
   dotMissed: {
-    backgroundColor: colors.textSubtle, // past day with no practice — visible
+    backgroundColor: colors.danger, // past day with no practice
   },
   dotTodayOpen: {
     backgroundColor: 'transparent', // today, not yet practiced — ring carries it
   },
   dotFuture: {
-    backgroundColor: colors.border, // upcoming — faintest
+    backgroundColor: colors.textSubtle, // upcoming — same grey previously used for missed days
   },
   dayInitial: {
-    fontSize: fontSize.xs,
+    fontSize: fontSize.sm,
     fontFamily: fonts.medium,
     color: colors.textSubtle,
-    marginTop: spacing.xs,
   },
   dayInitialToday: {
     color: colors.text,
@@ -774,6 +879,12 @@ const styles = StyleSheet.create({
     fontSize: fontSize.sm,
     fontFamily: fonts.medium,
     color: colors.accent,
+  },
+  seeAllMuted: {
+    fontSize: fontSize.sm,
+    fontFamily: fonts.medium,
+    color: colors.textSubtle,
+    opacity: 0.6,
   },
   emptyLine: {
     fontSize: fontSize.sm,

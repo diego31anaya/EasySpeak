@@ -5,11 +5,18 @@
 // ring (`lastScore`) is NOT stored here — it's DERIVED from the sessions table (the latest
 // SCORED 'vocab' session for the word) via the vocab_words_with_scores() RPC, so deleting a
 // session updates the ring with no stale denormalized copy (recompute-on-read, like the
-// rest of the app). All calls are RLS-scoped (the policy filters to auth.uid()), so
-// reads/updates/deletes need no explicit user_id filter; only the insert must set user_id.
+// rest of the app). RLS remains the authorization boundary; direct table mutations
+// also include an explicit user_id filter so Postgres can construct a narrower plan.
 
 import { supabase } from './supabase';
 import type { DictionaryEntry } from './dictionary';
+
+async function currentUserId(): Promise<string> {
+  const { data } = await supabase.auth.getSession();
+  const userId = data.session?.user.id;
+  if (!userId) throw new Error('Not signed in — cannot touch vocabulary.');
+  return userId;
+}
 
 /**
  * Where a word's current definition came from. The AI rubric branches on this: a dictionary
@@ -116,9 +123,7 @@ export async function addVocabWord(
   word: string,
   entry: DictionaryEntry | null,
 ): Promise<AddVocabResult> {
-  const { data: sess } = await supabase.auth.getSession();
-  const userId = sess.session?.user.id;
-  if (!userId) throw new Error('Not signed in — cannot add a vocab word.');
+  const userId = await currentUserId();
 
   const { data, error } = await supabase
     .from('vocab_words')
@@ -142,7 +147,12 @@ export async function addVocabWord(
 }
 
 export async function deleteVocabWord(id: string): Promise<void> {
-  const { error } = await supabase.from('vocab_words').delete().eq('id', id);
+  const userId = await currentUserId();
+  const { error } = await supabase
+    .from('vocab_words')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', userId);
   if (error) throw error;
 }
 
@@ -153,7 +163,12 @@ export async function deleteVocabWord(id: string): Promise<void> {
  */
 export async function deleteVocabWords(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  const { error } = await supabase.from('vocab_words').delete().in('id', ids);
+  const userId = await currentUserId();
+  const { error } = await supabase
+    .from('vocab_words')
+    .delete()
+    .in('id', ids)
+    .eq('user_id', userId);
   if (error) throw error;
 }
 
@@ -173,6 +188,7 @@ export async function updateVocabWord(
   fields: { definition: string | null; partOfSpeech: string | null },
   source: Exclude<DefinitionSource, 'none'>,
 ): Promise<void> {
+  const userId = await currentUserId();
   const { error } = await supabase
     .from('vocab_words')
     .update({
@@ -180,6 +196,7 @@ export async function updateVocabWord(
       part_of_speech: fields.partOfSpeech,
       definition_source: source,
     })
-    .eq('id', id);
+    .eq('id', id)
+    .eq('user_id', userId);
   if (error) throw error;
 }

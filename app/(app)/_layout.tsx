@@ -3,6 +3,8 @@ import { useEffect } from 'react';
 import { ActivityIndicator, AppState, View } from 'react-native';
 import { useAuth } from '../../lib/auth';
 import { syncReminderOnLaunch } from '../../lib/notifications';
+import { LocalDayProvider } from '../../hooks/use-local-day';
+import { StreakProvider } from '../../hooks/use-streak';
 
 export default function AppLayout() {
     const { session, loading, recoveryMode } = useAuth();
@@ -41,6 +43,8 @@ export default function AppLayout() {
 
 
      return (
+      <LocalDayProvider>
+         <StreakProvider key={session.user.id}>
        <Stack
          screenOptions={{
            headerShown: false,
@@ -66,5 +70,7 @@ export default function AppLayout() {
          <Stack.Screen name="custom-fillers" options={{ presentation: 'modal' }} />
          <Stack.Screen name="practice-focus" options={{ presentation: 'modal' }} />
        </Stack>
+       </StreakProvider>
+       </LocalDayProvider>
      );
 }

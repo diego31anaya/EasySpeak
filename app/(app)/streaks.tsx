@@ -7,7 +7,6 @@
 // Only the NO-STREAK state (new / lapsed-with-a-1-day-best) is built so far; the
 // rest are stubbed.
 
-import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -16,33 +15,23 @@ import Svg, { Path } from 'react-native-svg';
 
 import { colors, fontSize, fonts, spacing } from '../../lib/theme';
 import { backFlow } from '../../lib/navigation';
-import { getStreak, streakState, type Streak, type StreakState } from '../../lib/streak';
+import {
+  streakState,
+  type StreakState,
+} from '../../lib/streak';
 import { OUTER_FLAME } from '../../components/StreakBadge';
 import { AnimatedFlame } from '../../components/AnimatedFlame';
+import { useLocalDay } from '../../hooks/use-local-day';
+import { useStreak } from '../../hooks/use-streak';
 
 export default function Streaks() {
-  const [streak, setStreak] = useState<Streak | null>(null);
-  const [status, setStatus] = useState<'loading' | 'ok' | 'error'>('loading');
+  const localDay = useLocalDay();
 
-  useEffect(() => {
-    let cancelled = false;
-    getStreak()
-      .then((s) => {
-        if (!cancelled) {
-          setStreak(s);
-          setStatus('ok');
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          console.warn('[streaks] load failed:', e);
-          setStatus('error');
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const {
+    streak,
+    isPending,
+    isError,
+  } = useStreak();
 
   const close = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -73,10 +62,10 @@ export default function Streaks() {
         </View>
 
         <View style={styles.body}>
-          {status === 'loading' ? null : status === 'error' ? (
+          {streak ? (
+            <StreakBody state={streakState(streak, localDay)} />
+          ) : isPending ? null : isError ? (
             <Text style={styles.errorText}>Couldn&apos;t load your streak.</Text>
-          ) : streak ? (
-            <StreakBody state={streakState(streak)} />
           ) : null}
         </View>
       </SafeAreaView>

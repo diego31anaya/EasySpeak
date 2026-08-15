@@ -1,0 +1,8 @@
+8/9/26
+We're making a trade off for the week strip. The week strip will get its data from the session table
+This means that if a user deletes all of their sessions on a day then it will appear as if they
+didn't do any sessions on that day even though they did. This conflicts with the streaks, but for now
+The likelyhood that a user will do this and see that UI/UX is minimal.
+
+8/12/26
+Currently a session upload and thr WAV upload is seperate. Add to an RPC to make them both happen so neither gets uploaded if the other doesn't due to an error.

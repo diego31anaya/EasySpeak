@@ -6,18 +6,19 @@
 // always-visible footer. Small, centered, danger-outlined: delete is rare and
 // destructive, so it's deliberately not a prominent CTA.
 //
-// Confirms, deletes the session + its recording, then pops back to /history
-// (which reloads on focus, so the row disappears).
+// Confirms, deletes the session + its recording, invalidates History, then pops back.
 //
 // Review-only: the practice results screens have a "Try again" footer instead.
 
 import { useCallback, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import { useQueryClient } from '@tanstack/react-query';
 
 import { colors, spacing, fontSize, fonts, radius } from '../lib/theme';
 import { backFlow } from '../lib/navigation';
 import { deleteSession } from '../lib/sessions';
+import { useAuth } from '../lib/auth';
 
 type Props = {
   sessionId: string;
@@ -25,6 +26,9 @@ type Props = {
 }
 
 export function ReviewDeleteButton({ sessionId, onDeleted}: Props) {
+  const queryClient = useQueryClient();
+  const { session } = useAuth();
+  const userId = session?.user.id ?? '';
   const [deleting, setDeleting] = useState(false);
 
   const handleDelete = useCallback(() => {
@@ -38,8 +42,15 @@ export function ReviewDeleteButton({ sessionId, onDeleted}: Props) {
           setDeleting(true);
           try {
             await deleteSession(sessionId);
+
+            if (userId) {
+              void queryClient.invalidateQueries({
+                queryKey: ['history', 'sessions', userId],
+              });
+            }
+
             onDeleted?.();
-            backFlow(); // pop to /history; it reloads on focus, so the row is gone
+            backFlow();
           } catch (e: any) {
             console.warn('[review] delete failed:', e);
             setDeleting(false);
@@ -48,7 +59,7 @@ export function ReviewDeleteButton({ sessionId, onDeleted}: Props) {
         },
       },
     ]);
-  }, [sessionId, onDeleted]);
+  }, [sessionId, onDeleted, queryClient, userId]);
 
   return (
     <View style={styles.wrap}>

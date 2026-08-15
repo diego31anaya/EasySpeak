@@ -36,6 +36,13 @@ state or workflow, `AGENTS.md` wins; verify the live code before relying on eith
   `['history', 'sessions', userId]`.
 - A completed Vocabulary practice session also affects Vocabulary caches. Preserve the existing
   word-list/latest-session invalidations alongside History invalidation where applicable.
+- All seven production session-creation paths invalidate
+  `['history', 'sessions', userId]` after a successful insert. This covers Home Recent, Home Week
+  Strip, and every History filter/search variant; Vocabulary also keeps its score-dependent caches.
+- `ReviewDeleteButton` owns History invalidation after every successful review deletion; its
+  optional `onDeleted` callback remains for mode-specific cache effects. A successful Vocabulary
+  session save always invalidates History, while its word-list/latest-session caches only need
+  invalidation when the saved session has a score.
 - Once every session mutation path invalidates its affected keys, History should not need a
   navigation-focus refetch. Until that work is complete, returning from a review can leave History
   stale; do not describe the migration as complete.
@@ -55,6 +62,29 @@ state or workflow, `AGENTS.md` wins; verify the live code before relying on eith
 - `vocab_words_with_scores(integer, timestamptz, uuid)` owns the cursor predicate and `limit + 1`
   inside the RPC, selecting one page before computing latest-session scores. The client requires
   migration `20260806120000_paginate_vocab_words_with_scores.sql` to be deployed before it runs.
+
+### Streak RPC cutover (2026-08-12)
+
+- The user reports migration `20260812120000_replace_streak_trigger_with_rpc.sql` was pushed on
+  2026-08-15; it was not independently hosted-tested in this run. It removes only the per-session
+  streak trigger/function and creates authenticated `save_session_with_streak(...)`.
+- The RPC atomically inserts the first unconfirmed session of a local day, locks and updates the
+  profile streak, and returns the session id, authoritative `started`/`continued`/`none` event,
+  and complete streak snapshot. Concurrent same-day calls serialize and increment at most once.
+- All seven production practice routes now choose normal insert versus RPC from the shared streak
+  state, pass one save-boundary local day, apply the RPC snapshot to the streak Query cache, and
+  forward the RPC event to results banners. Each successful insert also invalidates the shared
+  History prefix. TTO uses refs because its finalize chain is effect-run; Vocabulary preserves its
+  additional word/latest-session invalidations. The unrelated
+  `set_session_metrics_trg` remains required and was not removed.
+- Trigger-era client event prediction and the in-process streak-change subscription channel were
+  removed. `StreakEvent` remains as the RPC result/banner contract.
+- The authenticated app layout owns the only `StreakProvider`, above both tabs and modals. The old
+  `lib/launch.ts` consume-once prefetch was removed; the native splash now waits only for fonts and
+  auth resolution, while screen/provider TanStack queries load after the navigator mounts.
+- `StreakProvider` is the sole owner of the streak Query observer. Its context exposes the full
+  cached snapshot plus pending/error state for the `/streaks` modal, alongside the derived badge
+  count, save-path boolean, and cache-update function.
 
 ## Where things stand (2026-08-02)
 

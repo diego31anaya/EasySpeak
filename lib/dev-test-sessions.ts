@@ -18,6 +18,7 @@ import { computeMetrics, serializeMetrics } from './metrics';
 import type { DeepgramWord } from './deepgram';
 import type { Shape } from './tto-framework-prompt';
 import type { TTOFeedback } from './tto-feedback';
+import { deviceLocalDate } from './streak';
 
 // A tiny but valid 16 kHz mono 16-bit WAV (0.1s of silence) so the audio
 // upload + signed-URL path gets exercised, not just the row insert.
@@ -99,7 +100,16 @@ async function seedImpromptu(): Promise<string> {
     metrics: serializeMetrics(computeMetrics(words, null, durationSec)),
   };
 
-  return saveImpromptuSession({ data, audioUri });
+  const result = await saveImpromptuSession({
+    data,
+    audioUri,
+    localDay: deviceLocalDate(),
+    // This helper has no React streak context. The RPC is idempotent, so it is
+    // the safe path for development saves regardless of today's current state.
+    shouldUpdateStreak: true,
+  });
+
+  return result.id;
 }
 
 const TTO_FIXTURE: {
@@ -165,7 +175,14 @@ async function seedTto(): Promise<string> {
   const data: TtoSessionData = { rounds, feedback, feedbackError: '' };
   // Reuse the same silent file for all three rounds; saveTtoSession uploads
   // each to its own round-{i}.wav path.
-  return saveTtoSession({ data, roundAudioUris: [audioUri, audioUri, audioUri] });
+  const result = await saveTtoSession({
+    data,
+    roundAudioUris: [audioUri, audioUri, audioUri],
+    localDay: deviceLocalDate(),
+    shouldUpdateStreak: true,
+  });
+
+  return result.id;
 }
 
 // DEV ONLY — seed `count` impromptu sessions spread across the last `spanDays` days,

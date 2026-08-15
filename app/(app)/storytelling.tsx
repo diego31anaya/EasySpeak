@@ -32,8 +32,11 @@ import {
   setPendingSaveId,
   setPendingStreakEvent,
 } from '../../lib/sessions';
-import { classifyStreakEvent, getStreak, type Streak, type StreakEvent } from '../../lib/streak';
+import { deviceLocalDate, type StreakEvent } from '../../lib/streak';
 import { refreshReminder } from '../../lib/notifications';
+import { useStreak } from '../../hooks/use-streak';
+import { useLocalDay } from '../../hooks/use-local-day';
+import { useQueryClient } from '@tanstack/react-query';
 
 type Phase = 'idle' | 'recording' | 'analyzing' | 'error';
 
@@ -55,7 +58,11 @@ const formatDuration = (s: number) => {
 
 export default function Storytelling() {
   const r = useRecording();
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
+  const userId = session?.user.id ?? '';
+  const queryClient = useQueryClient();
+  const { isStreakDone, updateStreak } = useStreak();
+  const localDay = useLocalDay();
   const [phase, setPhase] = useState<Phase>('idle');
   // What the story is about. Optional — empty is fine (the feedback infers it from the
   // transcript, and the session falls back to the default title).
@@ -196,22 +203,11 @@ export default function Storytelling() {
       // Persist to history (fire-and-forget). Skip too-short attempts: no
       // analyzable content to review.
       if (!metrics.tooShort) {
-        // One background chain: (1) snapshot the streak BEFORE the insert (the
-        // AFTER INSERT trigger bumps the counter, so the read must precede the
-        // save), (2) save, (3) classify what the save did to the streak. Feeds the
-        // two results-screen hand-offs (row id → favorite star; streak event →
-        // banner). Never awaited here, so navigation to results isn't blocked.
         const audioUri = r.uri;
         const runP = (async (): Promise<{ id: string | null; event: StreakEvent }> => {
-          let before: Streak | null = null;
           try {
-            before = await getStreak();
-          } catch (e) {
-            console.warn('[streak] pre-save read failed:', e);
-          }
-          let id: string | null = null;
-          try {
-            id = await saveStorytellingHistory({
+            const sessionDay = deviceLocalDate();
+            const saveResult = await saveStorytellingHistory({
               data: {
                 transcript: result.transcript,
                 words: result.words,
@@ -223,20 +219,35 @@ export default function Storytelling() {
                 metrics: serializeMetrics(metrics),
               },
               audioUri,
+              localDay: sessionDay,
+              shouldUpdateStreak: !isStreakDone || sessionDay !== localDay,
             });
-          } catch (e) {
-            console.warn('[sessions] save storytelling failed:', e);
+
+            if (saveResult.streak) {
+              updateStreak(saveResult.streak);
+            }
+
+            if (userId) {
+              void queryClient.invalidateQueries({
+                queryKey: ['history', 'sessions', userId],
+              });
+            }
+
+            console.log('[streak] event:', saveResult.streakEvent);
+            return { id: saveResult.id, event: saveResult.streakEvent };
+          } catch (error) {
+            console.warn('[sessions] save storytelling failed:', error);
+            return { id: null, event: { kind: 'none' } };
           }
-          const event: StreakEvent = id && before ? classifyStreakEvent(before) : { kind: 'none' };
-          console.log('[streak] event:', event);
-          return { id, event };
         })();
 
         setPendingSaveId(runP.then((res) => res.id));
         setPendingStreakEvent(runP.then((res) => res.event));
-        // Refresh the streak-aware reminder now a session was saved. Chained after
-        // runP so getStreak reads the trigger-updated streak. Fire-and-forget.
-        runP.then(() => refreshReminder()).catch(() => {});
+        runP
+          .then((save) => {
+            if (save.id) return refreshReminder();
+          })
+          .catch(() => {});
       }
 
       // If the user opened the exit-confirmation modal during analyze, wait here

@@ -18,12 +18,14 @@
 
 import { File } from 'expo-file-system';
 import { supabase } from './supabase';
-import { deviceLocalDate, type StreakEvent } from './streak';
-import { notifyStreakChanged } from './streak-events';
 import type { DeepgramWord } from './deepgram';
 import type { SerializableSessionMetrics } from './metrics';
 import type { TTOFeedback } from './tto-feedback';
 import type { Shape } from './tto-framework-prompt';
+import {
+  type Streak,
+  type StreakEvent,
+} from './streak';
 
 const BUCKET = 'recordings';
 // Detail screens are short-lived; an hour is plenty for a playback session.
@@ -318,34 +320,28 @@ async function signedUrl(path: string | undefined): Promise<string | null> {
 // ============================================================
 
 /**
- * Persist a finished Impromptu attempt. Returns the new session id. Inserts
- * the row first, then uploads the recording in the background and patches
+ * Persist a finished Impromptu attempt. Returns the session id plus any streak
+ * result. Inserts the row first, then uploads the recording and patches
  * data.audioPath. Call fire-and-forget; never await this on the UI path.
  */
 export async function saveImpromptuSession(args: {
   data: ImpromptuSessionData;
   audioUri: string;
-}): Promise<string> {
+} & StreakSaveOptions): Promise<SaveSessionResult> {
   const userId = await currentUserId();
-  const { data, audioUri } = args;
+  const { data, audioUri, localDay, shouldUpdateStreak } = args;
 
-  const { data: row, error } = await supabase
-    .from('sessions')
-    .insert({
-      user_id: userId,
-      mode: 'impromptu',
-      score: data.aiScore,
-      duration_sec: data.durationSec,
-      prompt: data.impromptuPrompt,
-      local_date: deviceLocalDate(),
-      data,
-    })
-    .select('id')
-    .single();
-
-  if (error) throw error;
-  const id = row.id as string;
-  notifyStreakChanged();
+  const result = await insertSession(userId, {
+    mode: 'impromptu',
+    score: data.aiScore,
+    durationSec: data.durationSec,
+    prompt: data.impromptuPrompt,
+    customTitle: null,
+    localDay,
+    data,
+    shouldUpdateStreak,
+  });
+  const id = result.id;
 
   // Audio is best-effort: if it fails the session still exists, just without
   // playback on the detail screen.
@@ -355,12 +351,13 @@ export async function saveImpromptuSession(args: {
     await supabase
       .from('sessions')
       .update({ data: { ...data, audioPath: path } })
-      .eq('id', id);
+      .eq('id', id)
+      .eq('user_id', userId);
   } catch (e) {
     console.warn('[sessions] impromptu audio upload failed:', e);
   }
 
-  return id;
+  return result;
 }
 
 /**
@@ -368,34 +365,28 @@ export async function saveImpromptuSession(args: {
  * (AI-generated or the user's own) is written to the `prompt` column — like debate/prep,
  * an app-handed topic is a prompt, not a user-authored title — so it shows as the History
  * card subtitle + is searchable, and the title stays the generic DEFAULT_TITLE.explain.
- * Returns the new session id; call fire-and-forget.
+ * Returns the session id plus any streak result; call fire-and-forget.
  */
 export async function saveExplainSession(args: {
   data: ExplainSessionData;
   audioUri: string;
-}): Promise<string> {
+} & StreakSaveOptions): Promise<SaveSessionResult> {
   const userId = await currentUserId();
-  const { data, audioUri } = args;
+  const { data, audioUri, localDay, shouldUpdateStreak } = args;
 
   const topic = data.topic.trim();
 
-  const { data: row, error } = await supabase
-    .from('sessions')
-    .insert({
-      user_id: userId,
-      mode: 'explain',
-      score: data.aiScore,
-      duration_sec: data.durationSec,
-      prompt: topic.length > 0 ? topic : null, // the topic to explain (generated or typed)
-      local_date: deviceLocalDate(),
-      data,
-    })
-    .select('id')
-    .single();
-
-  if (error) throw error;
-  const id = row.id as string;
-  notifyStreakChanged();
+  const result = await insertSession(userId, {
+    mode: 'explain',
+    score: data.aiScore,
+    durationSec: data.durationSec,
+    prompt: topic.length > 0 ? topic : null,
+    customTitle: null,
+    localDay,
+    data,
+    shouldUpdateStreak,
+  });
+  const id = result.id;
 
   try {
     const path = `${userId}/${id}/recording.wav`;
@@ -403,12 +394,13 @@ export async function saveExplainSession(args: {
     await supabase
       .from('sessions')
       .update({ data: { ...data, audioPath: path } })
-      .eq('id', id);
+      .eq('id', id)
+      .eq('user_id', userId);
   } catch (e) {
     console.warn('[sessions] explain audio upload failed:', e);
   }
 
-  return id;
+  return result;
 }
 
 /**
@@ -416,35 +408,28 @@ export async function saveExplainSession(args: {
  * WORD is the title (custom_title) so History shows it, and there are no metrics
  * (meaning-only). The per-word ring is DERIVED from these sessions rows (the latest scored
  * 'vocab' session for the word), so nothing extra is written to vocab_words here.
- * `mode:'vocab'` inserts a real sessions row, so the streak trigger fires and it shows in
- * History (it's excluded only from the Profile chart RPCs). Returns the new session id;
- * call fire-and-forget.
+ * `mode:'vocab'` inserts a real sessions row, so it shows in History (it's excluded only
+ * from the Profile chart RPCs). Returns the session id plus any streak result; call
+ * fire-and-forget.
  */
 export async function saveVocabSession(args: {
   data: VocabSessionData;
   audioUri: string;
-}): Promise<string> {
+} & StreakSaveOptions): Promise<SaveSessionResult> {
   const userId = await currentUserId();
-  const { data, audioUri } = args;
+  const { data, audioUri, localDay, shouldUpdateStreak } = args;
 
-  const { data: row, error } = await supabase
-    .from('sessions')
-    .insert({
-      user_id: userId,
-      mode: 'vocab',
-      score: data.aiScore,
-      duration_sec: data.durationSec,
-      prompt: null,
-      custom_title: data.word, // the word IS the session title
-      local_date: deviceLocalDate(),
-      data,
-    })
-    .select('id')
-    .single();
-
-  if (error) throw error;
-  const id = row.id as string;
-  notifyStreakChanged();
+  const result = await insertSession(userId, {
+    mode: 'vocab',
+    score: data.aiScore,
+    durationSec: data.durationSec,
+    prompt: null,
+    customTitle: data.word,
+    localDay,
+    data,
+    shouldUpdateStreak,
+  });
+  const id = result.id;
 
   try {
     const path = `${userId}/${id}/recording.wav`;
@@ -452,12 +437,13 @@ export async function saveVocabSession(args: {
     await supabase
       .from('sessions')
       .update({ data: { ...data, audioPath: path } })
-      .eq('id', id);
+      .eq('id', id)
+      .eq('user_id', userId);
   } catch (e) {
     console.warn('[sessions] vocab audio upload failed:', e);
   }
 
-  return id;
+  return result;
 }
 
 export type LatestVocabSession = {
@@ -474,9 +460,11 @@ export type LatestVocabSession = {
  * cheap newest-first walk stopped at limit 1; the wordId lives in `data` jsonb (no FK).
  */
 export async function getLatestVocabSession(wordId: string): Promise<LatestVocabSession | null> {
+  const userId = await currentUserId();
   const { data, error } = await supabase
     .from('sessions')
     .select('id, created_at, score, duration_sec')
+    .eq('user_id', userId)
     .eq('mode', 'vocab')
     .eq('data->>wordId', wordId)
     .not('score', 'is', null)
@@ -496,35 +484,28 @@ export async function getLatestVocabSession(wordId: string): Promise<LatestVocab
 /**
  * Persist a finished Storytelling attempt. Identical to saveExplainSession (topic
  * → custom_title as the session title; prompt null); only the mode differs. Returns
- * the new session id; call fire-and-forget.
+ * the session id plus any streak result; call fire-and-forget.
  */
 export async function saveStorytellingSession(args: {
   data: StorytellingSessionData;
   audioUri: string;
-}): Promise<string> {
+} & StreakSaveOptions): Promise<SaveSessionResult> {
   const userId = await currentUserId();
-  const { data, audioUri } = args;
+  const { data, audioUri, localDay, shouldUpdateStreak } = args;
 
   const title = data.topic.trim();
 
-  const { data: row, error } = await supabase
-    .from('sessions')
-    .insert({
-      user_id: userId,
-      mode: 'storytelling',
-      score: data.aiScore,
-      duration_sec: data.durationSec,
-      prompt: null, // no generated prompt; the typed topic is the title (custom_title)
-      custom_title: title.length > 0 ? title : null,
-      local_date: deviceLocalDate(),
-      data,
-    })
-    .select('id')
-    .single();
-
-  if (error) throw error;
-  const id = row.id as string;
-  notifyStreakChanged();
+  const result = await insertSession(userId, {
+    mode: 'storytelling',
+    score: data.aiScore,
+    durationSec: data.durationSec,
+    prompt: null,
+    customTitle: title.length > 0 ? title : null,
+    localDay,
+    data,
+    shouldUpdateStreak,
+  });
+  const id = result.id;
 
   try {
     const path = `${userId}/${id}/recording.wav`;
@@ -532,44 +513,40 @@ export async function saveStorytellingSession(args: {
     await supabase
       .from('sessions')
       .update({ data: { ...data, audioPath: path } })
-      .eq('id', id);
+      .eq('id', id)
+      .eq('user_id', userId);
   } catch (e) {
     console.warn('[sessions] storytelling audio upload failed:', e);
   }
 
-  return id;
+  return result;
 }
 
 /**
  * Persist a finished Debate attempt. Diverges from explain/storytelling: the argued
  * `statement` goes in the `prompt` column (searchable + shown as the card subtitle,
  * like impromptu) and `custom_title` stays null (the generic "Debate Result" title
- * shows; rename still works). Returns the new session id; call fire-and-forget.
+ * shows; rename still works). Returns the session id plus any streak result; call
+ * fire-and-forget.
  */
 export async function saveDebateSession(args: {
   data: DebateSessionData;
   audioUri: string;
-}): Promise<string> {
+} & StreakSaveOptions): Promise<SaveSessionResult> {
   const userId = await currentUserId();
-  const { data, audioUri } = args;
+  const { data, audioUri, localDay, shouldUpdateStreak } = args;
 
-  const { data: row, error } = await supabase
-    .from('sessions')
-    .insert({
-      user_id: userId,
-      mode: 'debate',
-      score: data.aiScore,
-      duration_sec: data.durationSec,
-      prompt: data.statement, // the argued claim — the card subtitle, searchable
-      local_date: deviceLocalDate(),
-      data,
-    })
-    .select('id')
-    .single();
-
-  if (error) throw error;
-  const id = row.id as string;
-  notifyStreakChanged();
+  const result = await insertSession(userId, {
+    mode: 'debate',
+    score: data.aiScore,
+    durationSec: data.durationSec,
+    prompt: data.statement,
+    customTitle: null,
+    localDay,
+    data,
+    shouldUpdateStreak,
+  });
+  const id = result.id;
 
   try {
     const path = `${userId}/${id}/recording.wav`;
@@ -577,44 +554,39 @@ export async function saveDebateSession(args: {
     await supabase
       .from('sessions')
       .update({ data: { ...data, audioPath: path } })
-      .eq('id', id);
+      .eq('id', id)
+      .eq('user_id', userId);
   } catch (e) {
     console.warn('[sessions] debate audio upload failed:', e);
   }
 
-  return id;
+  return result;
 }
 
 /**
  * Persist a finished PREP attempt. Like saveDebateSession: the scenario `prompt` goes
  * in the `prompt` column (searchable + card subtitle) and `custom_title` stays null
- * (generic "PREP Result" title; rename still works). Returns the new session id; call
- * fire-and-forget.
+ * (generic "PREP Result" title; rename still works). Returns the session id plus any
+ * streak result; call fire-and-forget.
  */
 export async function savePrepSession(args: {
   data: PrepSessionData;
   audioUri: string;
-}): Promise<string> {
+} & StreakSaveOptions): Promise<SaveSessionResult> {
   const userId = await currentUserId();
-  const { data, audioUri } = args;
+  const { data, audioUri, localDay, shouldUpdateStreak } = args;
 
-  const { data: row, error } = await supabase
-    .from('sessions')
-    .insert({
-      user_id: userId,
-      mode: 'prep',
-      score: data.aiScore,
-      duration_sec: data.durationSec,
-      prompt: data.prompt, // the scenario the user made their case about
-      local_date: deviceLocalDate(),
-      data,
-    })
-    .select('id')
-    .single();
-
-  if (error) throw error;
-  const id = row.id as string;
-  notifyStreakChanged();
+  const result = await insertSession(userId, {
+    mode: 'prep',
+    score: data.aiScore,
+    durationSec: data.durationSec,
+    prompt: data.prompt,
+    customTitle: null,
+    localDay,
+    data,
+    shouldUpdateStreak,
+  });
+  const id = result.id;
 
   try {
     const path = `${userId}/${id}/recording.wav`;
@@ -622,12 +594,13 @@ export async function savePrepSession(args: {
     await supabase
       .from('sessions')
       .update({ data: { ...data, audioPath: path } })
-      .eq('id', id);
+      .eq('id', id)
+      .eq('user_id', userId);
   } catch (e) {
     console.warn('[sessions] prep audio upload failed:', e);
   }
 
-  return id;
+  return result;
 }
 
 /**
@@ -639,9 +612,9 @@ export async function savePrepSession(args: {
 export async function saveTtoSession(args: {
   data: TtoSessionData;
   roundAudioUris: string[];
-}): Promise<string> {
+} & StreakSaveOptions): Promise<SaveSessionResult> {
   const userId = await currentUserId();
-  const { data, roundAudioUris } = args;
+  const { data, roundAudioUris, localDay, shouldUpdateStreak } = args;
 
   const score =
     data.feedback && data.feedback.rounds.length > 0
@@ -650,23 +623,17 @@ export async function saveTtoSession(args: {
       : null;
   const durationSec = data.rounds.reduce((acc, r) => acc + (r.durationSec || 0), 0);
 
-  const { data: row, error } = await supabase
-    .from('sessions')
-    .insert({
-      user_id: userId,
-      mode: 'tto',
-      score,
-      duration_sec: durationSec,
-      prompt: null, // UI shows "3-2-1 Framework"; per-round prompts live in data
-      local_date: deviceLocalDate(),
-      data,
-    })
-    .select('id')
-    .single();
-
-  if (error) throw error;
-  const id = row.id as string;
-  notifyStreakChanged();
+  const result = await insertSession(userId, {
+    mode: 'tto',
+    score,
+    durationSec,
+    prompt: null,
+    customTitle: null,
+    localDay,
+    data,
+    shouldUpdateStreak,
+  });
+  const id = result.id;
 
   try {
     const rounds = data.rounds.map((r) => ({ ...r }));
@@ -681,12 +648,13 @@ export async function saveTtoSession(args: {
     await supabase
       .from('sessions')
       .update({ data: { ...data, rounds } })
-      .eq('id', id);
+      .eq('id', id)
+      .eq('user_id', userId);
   } catch (e) {
     console.warn('[sessions] tto audio upload failed:', e);
   }
 
-  return id;
+  return result;
 }
 
 // ============================================================
@@ -723,12 +691,14 @@ export async function fetchHistoryPage({
   filters?: Filters;
   search?: string;
 }): Promise<{items: SessionListItem[]; nextCursor: HistoryCursor}> {
+  const userId = await currentUserId();
 
   const ascending = filters.order === 'oldest';
 
   let query = supabase
   .from('sessions')
   .select('id, created_at, mode, score, duration_sec, prompt, custom_title, favorite')
+  .eq('user_id', userId)
   .order('created_at', { ascending })
   .order('id', { ascending }) // tiebreaker for equal timestamps
 
@@ -802,6 +772,34 @@ export async function fetchHistoryPage({
   return { items, nextCursor }
 }
 
+export async function fetchWeekStrip({
+  fromDate,
+  throughDate,
+}: {
+  fromDate: string;
+  throughDate: string;
+}): Promise<string[]> {
+  const userId = await currentUserId();
+  const { data, error } = await supabase
+    .from('sessions')
+    .select('local_date')
+    .eq('user_id', userId)
+    .not('local_date', 'is', null)
+    .gte('local_date', fromDate)
+    .lte('local_date', throughDate)
+    .order('local_date', { ascending: true });
+
+  if (error) throw error;
+
+  return [
+    ...new Set(
+      (data ?? [])
+        .map((row) => row.local_date)
+        .filter((date): date is string => date !== null),
+    ),
+  ];
+}
+
 
 /**
  * The signed-in user's sessions. RLS scopes to them.
@@ -825,12 +823,14 @@ export async function listSessions(opts?: {
   favoritesOnly?: boolean;
   search?: string;
 }): Promise<SessionListItem[]> {
+  const userId = await currentUserId();
   // One mutable query: supabase-js's builder mutates-and-returns-self, so every
   // clause (filters AND paging) must chain off the SAME object. Page LAST so the
   // .range()/.limit() applies to the filtered set, not an unfiltered base.
   let query = supabase
     .from('sessions')
     .select('id, created_at, mode, score, duration_sec, prompt, custom_title, favorite')
+    .eq('user_id', userId)
     .order('created_at', { ascending: opts?.order === 'oldest' });
 
   // Mode: only when a non-empty STRICT subset of all modes. Empty OR all-selected
@@ -1101,10 +1101,12 @@ export async function getMetricHistory(): Promise<MetricHistory> {
  * playback. Returns null if the row doesn't exist (or RLS hides it).
  */
 export async function getSession(id: string): Promise<LoadedSession | null> {
+  const userId = await currentUserId();
   const { data: row, error } = await supabase
     .from('sessions')
     .select('id, created_at, mode, data, custom_title, favorite')
     .eq('id', id)
+    .eq('user_id', userId)
     .maybeSingle();
 
   if (error) throw error;
@@ -1204,11 +1206,16 @@ export async function getSession(id: string): Promise<LoadedSession | null> {
 }
 
 /**
- * Toggle/set the favorite flag on one session. RLS scopes the update to the
- * signed-in user, so no explicit user filter is needed.
+ * Toggle/set the favorite flag on one session. The explicit user filter helps
+ * Postgres plan the request; RLS remains the authorization boundary.
  */
 export async function setFavorite(id: string, favorite: boolean): Promise<void> {
-  const { error } = await supabase.from('sessions').update({ favorite }).eq('id', id);
+  const userId = await currentUserId();
+  const { error } = await supabase
+    .from('sessions')
+    .update({ favorite })
+    .eq('id', id)
+    .eq('user_id', userId);
   if (error) throw error;
 }
 
@@ -1219,8 +1226,13 @@ export async function setFavorite(id: string, favorite: boolean): Promise<void> 
  * "never set" identically — the DB never holds a blank custom title.
  */
 export async function setCustomTitle(id: string, customTitle: string | null): Promise<void> {
+  const userId = await currentUserId();
   const value = customTitle?.trim() ? customTitle.trim() : null;
-  const { error } = await supabase.from('sessions').update({ custom_title: value }).eq('id', id);
+  const { error } = await supabase
+    .from('sessions')
+    .update({ custom_title: value })
+    .eq('id', id)
+    .eq('user_id', userId);
   if (error) throw error;
 }
 
@@ -1244,11 +1256,10 @@ export function takePendingSaveId(): Promise<string | null> | null {
   return p;
 }
 
-// The same fresh-practice → results hand-off, for the streak banner. The practice
-// screen snapshots the streak BEFORE the insert (the trigger bumps the counter),
-// then resolves the classified event once the save lands so the results screen can
-// drop a "New streak" / "Continued streak" banner. Resolves to `{ kind: 'none' }`
-// when the save failed or the day was already counted (no banner). Consumed once.
+// The same fresh-practice → results hand-off, for the streak banner. The save RPC
+// returns the authoritative event, which the practice screen passes to its results
+// screen. Resolves to `{ kind: 'none' }` when the save failed or the day was already
+// counted (no banner). Consumed once.
 let pendingStreakEvent: Promise<StreakEvent> | null = null;
 
 export function setPendingStreakEvent(p: Promise<StreakEvent>): void {
@@ -1282,7 +1293,11 @@ export async function deleteSession(id: string): Promise<void> {
     console.warn('[sessions] delete storage cleanup failed:', e);
   }
 
-  const { error } = await supabase.from('sessions').delete().eq('id', id);
+  const { error } = await supabase
+    .from('sessions')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', userId);
   if (error) throw error;
 }
 
@@ -1311,6 +1326,139 @@ export async function deleteSessions(ids: string[]): Promise<void> {
     }),
   );
 
-  const { error } = await supabase.from('sessions').delete().in('id', ids);
+  const { error } = await supabase
+    .from('sessions')
+    .delete()
+    .in('id', ids)
+    .eq('user_id', userId);
   if (error) throw error;
+}
+
+
+type StoredSessionData =
+  | ImpromptuSessionData
+  | ExplainSessionData
+  | StorytellingSessionData
+  | DebateSessionData
+  | PrepSessionData
+  | VocabSessionData
+  | TtoSessionData;
+
+
+type InsertSessionInput = {
+  mode: SessionMode;
+  score: number | null;
+  durationSec: number;
+  prompt: string | null;
+  customTitle: string | null;
+  localDay: string;
+  data: StoredSessionData;
+  shouldUpdateStreak: boolean;
+};
+
+type StreakSaveOptions = {
+  localDay: string;
+  shouldUpdateStreak: boolean;
+};
+
+export type SaveSessionResult = {
+  id: string;
+  streakEvent: StreakEvent;
+  streak: Streak | null;
+};
+
+type SaveSessionWithStreakRow = {
+  session_id: string;
+  streak_event: 'started' | 'continued' | 'none';
+  current_streak: number;
+  longest_streak: number;
+  last_active_date: string | null;
+};
+
+async function insertSession(
+  userId: string,
+  input: InsertSessionInput,
+): Promise<SaveSessionResult> {
+  if (!input.shouldUpdateStreak) {
+    const { data: row, error } = await supabase
+      .from('sessions')
+      .insert({
+        user_id: userId,
+        mode: input.mode,
+        score: input.score,
+        duration_sec: input.durationSec,
+        prompt: input.prompt,
+        custom_title: input.customTitle,
+        local_date: input.localDay,
+        data: input.data,
+      })
+      .select('id')
+      .single();
+
+    if (error) throw error;
+
+    return {
+      id: row.id as string,
+      streakEvent: { kind: 'none' },
+      streak: null,
+    };
+  }
+
+  const { data: rawRow, error } = await supabase
+    .rpc('save_session_with_streak', {
+      p_mode: input.mode,
+      p_score: input.score,
+      p_duration_sec: input.durationSec,
+      p_prompt: input.prompt,
+      p_custom_title: input.customTitle,
+      p_local_date: input.localDay,
+      p_data: input.data,
+    })
+    .single();
+
+  if (error) throw error;
+
+  const row = rawRow as SaveSessionWithStreakRow | null;
+
+  if (!row) {
+    throw new Error('save_session_with_streak returned no result.');
+  }
+
+  const streak: Streak = {
+    current: Number(row.current_streak),
+    longest: Number(row.longest_streak),
+    lastActiveDate: row.last_active_date,
+  };
+
+  let streakEvent: StreakEvent;
+  switch (row.streak_event) {
+    case 'started':
+      streakEvent = {
+        kind: 'started',
+        count: streak.current,
+      };
+      break;
+
+    case 'continued':
+      streakEvent = {
+        kind: 'continued',
+        count: streak.current,
+      };
+      break;
+
+    case 'none':
+      streakEvent = { kind: 'none' };
+      break;
+
+    default:
+      throw new Error(
+        `Unexpected streak event: ${String(row.streak_event)}`,
+      );
+  }
+
+  return {
+    id: row.session_id,
+    streakEvent,
+    streak,
+  };
 }

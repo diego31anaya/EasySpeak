@@ -16,7 +16,7 @@ import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { supabase } from './supabase';
-import { getStreak, reminderCopy, streakState } from './streak';
+import { deviceLocalDate, getStreak, reminderCopy, streakState } from './streak';
 
 export type ReminderPref = { enabled: boolean; hour: number; minute: number };
 
@@ -134,7 +134,7 @@ async function ensureAndroidChannel(): Promise<void> {
 // out / offline / the read throws, so scheduling always succeeds.
 async function buildReminderContent(): Promise<{ title: string; body: string }> {
   try {
-    return reminderCopy(streakState(await getStreak()));
+    return reminderCopy(streakState(await getStreak(), deviceLocalDate()));
   } catch {
     return { title: REMINDER_TITLE, body: REMINDER_BODY };
   }

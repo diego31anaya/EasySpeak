@@ -1,9 +1,8 @@
 import { Tabs } from 'expo-router';
 import { Pressable, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, fonts, fontSize, } from '../../../lib/theme';
-import { StreakProvider, useStreak } from '../../../hooks/use-streak';
+import { useStreak } from '../../../hooks/use-streak';
 import { BookOpenIcon, HouseIcon, MicrophoneIcon, SettingsIcon, UserCircleIcon  } from '@/components/icons';
 import * as Haptics from 'expo-haptics';
 import { enterFlow } from '@/lib/navigation';
@@ -11,12 +10,7 @@ import { StreakBadge } from '@/components/StreakBadge';
 
 
 export default function TabsLayout() {
-
-  return (
-    <StreakProvider>
-      <TabsNavigator />
-    </StreakProvider>
-  );
+  return <TabsNavigator />;
 }
 
 function TabsNavigator() {

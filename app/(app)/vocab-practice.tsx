@@ -30,10 +30,12 @@ import {
   setPendingSaveId,
   setPendingStreakEvent,
 } from '../../lib/sessions';
-import { classifyStreakEvent, getStreak, type Streak, type StreakEvent } from '../../lib/streak';
+import { deviceLocalDate, type StreakEvent } from '../../lib/streak';
 import { refreshReminder } from '../../lib/notifications';
 import { useAuth } from '@/lib/auth';
 import { useQueryClient } from '@tanstack/react-query';
+import { useStreak } from '../../hooks/use-streak';
+import { useLocalDay } from '../../hooks/use-local-day';
 
 type Phase = 'idle' | 'recording' | 'analyzing' | 'error';
 
@@ -57,6 +59,8 @@ export default function VocabPractice() {
   const { session } = useAuth();
   const userId = session?.user.id ?? '';
   const queryClient = useQueryClient();
+  const { isStreakDone, updateStreak } = useStreak();
+  const localDay = useLocalDay();
 
   const params = useLocalSearchParams<{
     wordId: string;
@@ -163,20 +167,13 @@ export default function VocabPractice() {
         aiFeedbackError = true;
       }
 
-      // Save (fire-and-forget) — a real 'vocab' session (streak + History), and the save
-      // the word's ring derives from this session. Snapshot the streak BEFORE the insert (the trigger
-      // bumps after), then classify. Feeds the results hand-offs.
+      // Save (fire-and-forget) — a real Vocabulary session that affects the
+      // streak, History, and the word's latest-score caches.
       const audioUri = r.uri;
       const runP = (async (): Promise<{ id: string | null; event: StreakEvent }> => {
-        let before: Streak | null = null;
         try {
-          before = await getStreak();
-        } catch (e) {
-          console.warn('[streak] pre-save read failed:', e);
-        }
-        let id: string | null = null;
-        try {
-          id = await saveVocabSession({
+          const sessionDay = deviceLocalDate();
+          const saveResult = await saveVocabSession({
             data: {
               wordId,
               word,
@@ -189,25 +186,42 @@ export default function VocabPractice() {
               aiScore,
             },
             audioUri,
+            localDay: sessionDay,
+            shouldUpdateStreak: !isStreakDone || sessionDay !== localDay,
           });
 
-          if (id && userId && aiScore !== null) {
-            void queryClient.invalidateQueries({ queryKey: ['vocab', 'words', userId] })
-            void queryClient.invalidateQueries({ queryKey: ['vocab', 'latest-session', userId, wordId]})
+          if (saveResult.streak) {
+            updateStreak(saveResult.streak);
           }
 
+          if (userId) {
+            void queryClient.invalidateQueries({
+              queryKey: ['history', 'sessions', userId],
+            });
 
-        } catch (e) {
-          console.warn('[sessions] save vocab failed:', e);
+            if (aiScore !== null) {
+              void queryClient.invalidateQueries({ queryKey: ['vocab', 'words', userId] });
+              void queryClient.invalidateQueries({
+                queryKey: ['vocab', 'latest-session', userId, wordId],
+              });
+            }
+          }
+
+          console.log('[streak] event:', saveResult.streakEvent);
+          return { id: saveResult.id, event: saveResult.streakEvent };
+        } catch (error) {
+          console.warn('[sessions] save vocab failed:', error);
+          return { id: null, event: { kind: 'none' } };
         }
-        const event: StreakEvent = id && before ? classifyStreakEvent(before) : { kind: 'none' };
-        console.log('[streak] event:', event);
-        return { id, event };
       })();
 
       setPendingSaveId(runP.then((res) => res.id));
       setPendingStreakEvent(runP.then((res) => res.event));
-      runP.then(() => refreshReminder()).catch(() => {});
+      runP
+        .then((save) => {
+          if (save.id) return refreshReminder();
+        })
+        .catch(() => {});
 
       if (exitDecisionPromiseRef.current) {
         await exitDecisionPromiseRef.current.promise;

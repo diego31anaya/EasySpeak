@@ -38,8 +38,14 @@ import {
   setPendingSaveId,
   setPendingStreakEvent,
 } from '../../lib/sessions';
-import { classifyStreakEvent, getStreak, type Streak, type StreakEvent } from '../../lib/streak';
 import { refreshReminder } from '../../lib/notifications';
+import {
+  deviceLocalDate,
+  type StreakEvent,
+} from '../../lib/streak';
+import { useStreak } from '../../hooks/use-streak';
+import { useLocalDay } from '../../hooks/use-local-day';
+import { useQueryClient } from '@tanstack/react-query';
 
 
 const GRADIENT_INACTIVE = ['#1E3A4C', '#142A38'] as const;
@@ -71,7 +77,14 @@ const formatDuration = (s: number) => {
 export default function Impromptu() {
   const r = useRecording();
   const tts = useTTS();
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
+  const userId = session?.user.id ?? '';
+  const queryClient = useQueryClient();
+
+  const { isStreakDone, updateStreak } = useStreak();
+
+  const localDay = useLocalDay();
+
   const [phase, setPhase] = useState<Phase>('idle');
   const [prompt, setPrompt] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
@@ -299,54 +312,76 @@ export default function Impromptu() {
     // Persist to history (fire-and-forget — must never block results on the
     // network). Skip too-short attempts: no analyzable content to review.
     if (!metrics.tooShort) {
-      // One background chain that (1) snapshots the streak BEFORE the insert (the
-      // AFTER INSERT trigger bumps the counter, so the read must precede the save),
-      // (2) saves, then (3) classifies what the save did to the streak. Its result
-      // feeds two results-screen hand-offs: the row id (favorite star) and the
-      // streak event (the drop-down banner). Never awaited here, so navigation to
-      // results isn't blocked.
-      // Capture audioUri in this sync scope (its narrowing to string doesn't
-      // survive into the async closure below).
       const audioUri = r.uri;
+
       const runP = (async (): Promise<{ id: string | null; event: StreakEvent }> => {
-        let before: Streak | null = null;
         try {
-          before = await getStreak();
-        } catch (e) {
-          console.warn('[streak] pre-save read failed:', e);
-        }
-        let id: string | null = null;
-        try {
-          id = await saveImpromptuHistory({
+          const sessionDay = deviceLocalDate();
+
+          const saveResult = await saveImpromptuHistory({
             data: {
               transcript: result.transcript,
               words: result.words,
               durationSec: finalDuration,
               impromptuPrompt: prompt,
-              impromptuTopic: topicChoice === RANDOM ? '' : topicChoice,
-              impromptuType: typeChoice === RANDOM ? '' : typeChoice,
+              impromptuTopic:
+                topicChoice === RANDOM
+                  ? ''
+                  : topicChoice,
+              impromptuType:
+                typeChoice === RANDOM
+                  ? ''
+                  : typeChoice,
               aiFeedback,
               aiFeedbackError,
               aiScore,
               metrics: serializeMetrics(metrics),
             },
             audioUri,
+            localDay: sessionDay,
+            shouldUpdateStreak:
+              !isStreakDone ||
+              sessionDay !== localDay,
           });
-        } catch (e) {
-          console.warn('[sessions] save impromptu failed:', e);
+
+          // Only an RPC save brings back a streak.
+          if (saveResult.streak) {
+            updateStreak(saveResult.streak);
+          }
+
+          if (userId) {
+            void queryClient.invalidateQueries({
+              queryKey: ['history', 'sessions', userId],
+            });
+          }
+
+          console.log('[streak] event:', saveResult.streakEvent);
+
+          return {
+            id: saveResult.id,
+            event: saveResult.streakEvent,
+          };
+        } catch (error) {
+          console.warn('[sessions] save impromptu failed:', error);
+
+          return {
+            id: null,
+            event: { kind: 'none' },
+          };
         }
-        // No banner if the save failed (no streak change happened) or the read failed.
-        const event: StreakEvent = id && before ? classifyStreakEvent(before) : { kind: 'none' };
-        console.log('[streak] event:', event);
-        return { id, event };
       })();
 
-      setPendingSaveId(runP.then((r) => r.id));
-      setPendingStreakEvent(runP.then((r) => r.event));
-      // Refresh the streak-aware reminder now that a session was saved (practiced
-      // today → the "keep improving" message). Chained after runP so getStreak reads
-      // the trigger-updated streak. Fire-and-forget.
-      runP.then(() => refreshReminder()).catch(() => {});
+      setPendingSaveId(runP.then((save) => save.id));
+      setPendingStreakEvent(runP.then((save) => save.event));
+
+      // Rebuild the scheduled reminder only after a successful session save.
+      runP
+        .then((save) => {
+          if (save.id) {
+            return refreshReminder();
+          }
+        })
+        .catch(() => {});
     }
 
     // If the user opened the exit-confirmation modal during analyze, wait

@@ -45,9 +45,12 @@ import {
   setPendingSaveId,
   setPendingStreakEvent,
 } from '../../lib/sessions';
-import { classifyStreakEvent, getStreak, type Streak, type StreakEvent } from '../../lib/streak';
+import { deviceLocalDate, type StreakEvent } from '../../lib/streak';
 import { refreshReminder } from '../../lib/notifications';
 import { File, Paths } from 'expo-file-system';
+import { useStreak } from '../../hooks/use-streak';
+import { useLocalDay } from '../../hooks/use-local-day';
+import { useQueryClient } from '@tanstack/react-query';
 
 
 import { saveTTOSession, updateTTOSessionFeedback } from '../../lib/dev-cache-tto';
@@ -132,7 +135,23 @@ type FocusChoice = FocusId | 'default';
 type TimeChoice = TimeId | 'none';
 
   export default function TTOPractice() {
-    const { profile } = useAuth();
+    const { profile, session } = useAuth();
+    const userId = session?.user.id ?? '';
+    const queryClient = useQueryClient();
+    const { isStreakDone, updateStreak } = useStreak();
+    const localDay = useLocalDay();
+    // Finalization runs inside a phase-driven effect. Refs keep these values
+    // current without making a streak update or midnight change rerun the effect.
+    const isStreakDoneRef = useRef(isStreakDone);
+    isStreakDoneRef.current = isStreakDone;
+    const localDayRef = useRef(localDay);
+    localDayRef.current = localDay;
+    const updateStreakRef = useRef(updateStreak);
+    updateStreakRef.current = updateStreak;
+    const userIdRef = useRef(userId);
+    userIdRef.current = userId;
+    const queryClientRef = useRef(queryClient);
+    queryClientRef.current = queryClient;
     // Latest custom filler list, read inside the finalize effect without adding
     // `profile` to its deps (which would needlessly re-run finalize).
     const customFillersRef = useRef<string[]>([]);
@@ -362,20 +381,10 @@ type TimeChoice = TimeId | 'none';
     // Persist to history (fire-and-forget). Only when every round analyzed —
     // a too-short round means no metrics/feedback worth reviewing.
     if (allOk) {
-      // One background chain: snapshot the streak BEFORE the insert (the AFTER
-      // INSERT trigger bumps the counter), save, then classify what the save did.
-      // Feeds the row id (favorite star) and the streak event (banner) to results.
-      // Never awaited here, so navigation to results isn't blocked.
       const runP = (async (): Promise<{ id: string | null; event: StreakEvent }> => {
-        let before: Streak | null = null;
         try {
-          before = await getStreak();
-        } catch (e) {
-          console.warn('[streak] pre-save read failed:', e);
-        }
-        let id: string | null = null;
-        try {
-          id = await saveTtoHistory({
+          const sessionDay = deviceLocalDate();
+          const saveResult = await saveTtoHistory({
             data: {
               rounds: rounds.map((rd, i) => ({
                 shape: rd.shape,
@@ -389,22 +398,37 @@ type TimeChoice = TimeId | 'none';
               feedbackError: feedbackError ?? '',
             },
             roundAudioUris: rounds.map((rd) => rd.audioUri),
+            localDay: sessionDay,
+            shouldUpdateStreak:
+              !isStreakDoneRef.current || sessionDay !== localDayRef.current,
           });
-        } catch (e) {
-          console.warn('[sessions] save tto failed:', e);
+
+          if (saveResult.streak) {
+            updateStreakRef.current(saveResult.streak);
+          }
+
+          const savedUserId = userIdRef.current;
+          if (savedUserId) {
+            void queryClientRef.current.invalidateQueries({
+              queryKey: ['history', 'sessions', savedUserId],
+            });
+          }
+
+          console.log('[streak] event:', saveResult.streakEvent);
+          return { id: saveResult.id, event: saveResult.streakEvent };
+        } catch (error) {
+          console.warn('[sessions] save tto failed:', error);
+          return { id: null, event: { kind: 'none' } };
         }
-        // No banner if the save failed (no streak change) or the read failed.
-        const event: StreakEvent = id && before ? classifyStreakEvent(before) : { kind: 'none' };
-        console.log('[streak] event:', event);
-        return { id, event };
       })();
 
       setPendingSaveId(runP.then((r) => r.id));
       setPendingStreakEvent(runP.then((r) => r.event));
-      // Refresh the streak-aware reminder now that a session was saved (practiced
-      // today → the "keep improving" message). Chained after runP so getStreak reads
-      // the trigger-updated streak. Fire-and-forget.
-      runP.then(() => refreshReminder()).catch(() => {});
+      runP
+        .then((save) => {
+          if (save.id) return refreshReminder();
+        })
+        .catch(() => {});
     }
 
          // If the user opened the exit-confirmation sheet during finalize,

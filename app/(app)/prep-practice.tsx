@@ -32,8 +32,11 @@ import {
   setPendingSaveId,
   setPendingStreakEvent,
 } from '../../lib/sessions';
-import { classifyStreakEvent, getStreak, type Streak, type StreakEvent } from '../../lib/streak';
+import { deviceLocalDate, type StreakEvent } from '../../lib/streak';
 import { refreshReminder } from '../../lib/notifications';
+import { useStreak } from '../../hooks/use-streak';
+import { useLocalDay } from '../../hooks/use-local-day';
+import { useQueryClient } from '@tanstack/react-query';
 
 type Phase = 'idle' | 'recording' | 'analyzing' | 'error';
 
@@ -53,7 +56,11 @@ const formatDuration = (s: number) => {
 
 export default function PrepPractice() {
   const r = useRecording();
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
+  const userId = session?.user.id ?? '';
+  const queryClient = useQueryClient();
+  const { isStreakDone, updateStreak } = useStreak();
+  const localDay = useLocalDay();
   const [phase, setPhase] = useState<Phase>('idle');
   // The generated prompt + its inline loading state. `customTopic` (if non-empty) overrides
   // it. Active prompt = customTopic.trim() || prompt.
@@ -198,15 +205,9 @@ export default function PrepPractice() {
       if (!metrics.tooShort) {
         const audioUri = r.uri;
         const runP = (async (): Promise<{ id: string | null; event: StreakEvent }> => {
-          let before: Streak | null = null;
           try {
-            before = await getStreak();
-          } catch (e) {
-            console.warn('[streak] pre-save read failed:', e);
-          }
-          let id: string | null = null;
-          try {
-            id = await savePrepHistory({
+            const sessionDay = deviceLocalDate();
+            const saveResult = await savePrepHistory({
               data: {
                 prompt: prepPrompt,
                 transcript: result.transcript,
@@ -218,18 +219,35 @@ export default function PrepPractice() {
                 metrics: serializeMetrics(metrics),
               },
               audioUri,
+              localDay: sessionDay,
+              shouldUpdateStreak: !isStreakDone || sessionDay !== localDay,
             });
-          } catch (e) {
-            console.warn('[sessions] save prep failed:', e);
+
+            if (saveResult.streak) {
+              updateStreak(saveResult.streak);
+            }
+
+            if (userId) {
+              void queryClient.invalidateQueries({
+                queryKey: ['history', 'sessions', userId],
+              });
+            }
+
+            console.log('[streak] event:', saveResult.streakEvent);
+            return { id: saveResult.id, event: saveResult.streakEvent };
+          } catch (error) {
+            console.warn('[sessions] save prep failed:', error);
+            return { id: null, event: { kind: 'none' } };
           }
-          const event: StreakEvent = id && before ? classifyStreakEvent(before) : { kind: 'none' };
-          console.log('[streak] event:', event);
-          return { id, event };
         })();
 
         setPendingSaveId(runP.then((res) => res.id));
         setPendingStreakEvent(runP.then((res) => res.event));
-        runP.then(() => refreshReminder()).catch(() => {});
+        runP
+          .then((save) => {
+            if (save.id) return refreshReminder();
+          })
+          .catch(() => {});
       }
 
       if (exitDecisionPromiseRef.current) {

@@ -33,8 +33,11 @@ import {
   setPendingSaveId,
   setPendingStreakEvent,
 } from '../../lib/sessions';
-import { classifyStreakEvent, getStreak, type Streak, type StreakEvent } from '../../lib/streak';
+import { deviceLocalDate, type StreakEvent } from '../../lib/streak';
 import { refreshReminder } from '../../lib/notifications';
+import { useStreak } from '../../hooks/use-streak';
+import { useLocalDay } from '../../hooks/use-local-day';
+import { useQueryClient } from '@tanstack/react-query';
 
 const GRADIENT_INACTIVE = ['#1E3A4C', '#142A38'] as const;
 
@@ -56,7 +59,11 @@ const formatDuration = (s: number) => {
 
 export default function Debate() {
   const r = useRecording();
-  const { profile } = useAuth();
+  const { profile, session } = useAuth();
+  const userId = session?.user.id ?? '';
+  const queryClient = useQueryClient();
+  const { isStreakDone, updateStreak } = useStreak();
+  const localDay = useLocalDay();
   const [phase, setPhase] = useState<Phase>('idle');
   // The generated statement + its inline loading state. `customTopic` (if non-empty)
   // overrides it. Active statement = customTopic.trim() || statement.
@@ -211,15 +218,9 @@ export default function Debate() {
       if (!metrics.tooShort) {
         const audioUri = r.uri;
         const runP = (async (): Promise<{ id: string | null; event: StreakEvent }> => {
-          let before: Streak | null = null;
           try {
-            before = await getStreak();
-          } catch (e) {
-            console.warn('[streak] pre-save read failed:', e);
-          }
-          let id: string | null = null;
-          try {
-            id = await saveDebateHistory({
+            const sessionDay = deviceLocalDate();
+            const saveResult = await saveDebateHistory({
               data: {
                 statement: debatedStatement,
                 stance: debatedStance,
@@ -232,18 +233,35 @@ export default function Debate() {
                 metrics: serializeMetrics(metrics),
               },
               audioUri,
+              localDay: sessionDay,
+              shouldUpdateStreak: !isStreakDone || sessionDay !== localDay,
             });
-          } catch (e) {
-            console.warn('[sessions] save debate failed:', e);
+
+            if (saveResult.streak) {
+              updateStreak(saveResult.streak);
+            }
+
+            if (userId) {
+              void queryClient.invalidateQueries({
+                queryKey: ['history', 'sessions', userId],
+              });
+            }
+
+            console.log('[streak] event:', saveResult.streakEvent);
+            return { id: saveResult.id, event: saveResult.streakEvent };
+          } catch (error) {
+            console.warn('[sessions] save debate failed:', error);
+            return { id: null, event: { kind: 'none' } };
           }
-          const event: StreakEvent = id && before ? classifyStreakEvent(before) : { kind: 'none' };
-          console.log('[streak] event:', event);
-          return { id, event };
         })();
 
         setPendingSaveId(runP.then((res) => res.id));
         setPendingStreakEvent(runP.then((res) => res.event));
-        runP.then(() => refreshReminder()).catch(() => {});
+        runP
+          .then((save) => {
+            if (save.id) return refreshReminder();
+          })
+          .catch(() => {});
       }
 
       if (exitDecisionPromiseRef.current) {
